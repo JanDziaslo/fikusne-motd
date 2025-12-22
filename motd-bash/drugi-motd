@@ -24,6 +24,7 @@ draw_bar() {
 clear
 echo -e "${BLUE}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓${NC}"
 toilet -f small -F metal "                  $(hostname)"
+echo ""
 echo -e "${BLUE}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛${NC}"
 
 # podstawowe informacje o systemie
@@ -74,7 +75,7 @@ for MOUNT in "${MY_DISKS[@]}"; do
         # Skracanie ścieżki
         DISPLAY_NAME=$(echo "$MOUNT" | sed "s|$HOME|~|")
 
-        printf " ${GREEN}Disk:${NC} %-15s " "$DISPLAY_NAME"
+        printf " ${GREEN}Dysk:${NC} %-15s " "$DISPLAY_NAME"
         draw_bar "$PERC"
         echo -e " ($FREE wolne)"
     fi
