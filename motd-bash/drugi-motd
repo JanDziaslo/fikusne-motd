@@ -36,7 +36,7 @@ echo ""
 echo -e " ${CYAN}System:${PURPLE}          $(lsb_release -d | cut -f2)"
 echo -e " ${CYAN}Czas działania:${NC}  $UPTIME"
 echo -e " ${CYAN}IP:${NC}              $IP_LOC"
-echo -e "\n${BLUE}── RAM ────────────────────────────────────────────────────${NC}"
+echo -e "\n${BLUE}── RAM ────────────────────────────────────────────────────────${NC}"
 
 # RAM
 MEM_USED=$(free | awk '/^Mem/ {print $3}')
@@ -62,7 +62,7 @@ fi
 # Punkty montowania
 MY_DISKS=( "/" "/dysk2" "/dysk3" )
 
-echo -e "\n${BLUE}── Dyski ─────────────────────────────────────────────────────${NC}"
+echo -e "\n${BLUE}── Dyski ──────────────────────────────────────────────────────${NC}"
 
 echo ""
 
@@ -83,10 +83,10 @@ done
 
 # spawdzanie ile kontenerow dziala i ile jest wszytkich
 if command -v docker >/dev/null 2>&1; then
-    echo -e "\n${BLUE}── Kontenery ─────────────────────────────────────────────────${NC}"
+    echo -e "\n${BLUE}── Kontenery ──────────────────────────────────────────────────${NC}"
     echo ""
     D_RUNNING=$(docker ps -q | wc -l)
     D_TOTAL=$(docker ps -a -q | wc -l)
-    echo -e " ${PURPLE}Docker:${NC}   $D_RUNNING aktywnych / $D_TOTAL wszystkich"
+    echo -e " ${PURPLE}Docker:${NC}          $D_RUNNING aktywnych / $D_TOTAL wszystkich"
     echo ""
 fi
