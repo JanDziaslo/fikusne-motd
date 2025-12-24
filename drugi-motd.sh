@@ -9,6 +9,169 @@ PURPLE='\033[1;35m'
 CYAN='\033[1;36m'
 NC='\033[0m'
 
+# --- Aktualizacje (best-effort, szybkie: timeout + cache, bez wymuszania sieci) ---
+have() { command -v "$1" >/dev/null 2>&1; }
+
+run_timed() {
+    local seconds="$1"; shift
+    if have timeout; then
+        timeout "${seconds}" "$@"
+    else
+        "$@"
+    fi
+}
+
+motd_updates_cache_file() {
+    # /run jest preferowane (tmpfs), ale bywa niedostępne w chrootach/kontenerach
+    if [ -w /run ]; then
+        echo "/run/motd-updates.cache"
+    else
+        echo "/tmp/motd-updates.cache"
+    fi
+}
+
+motd_updates_cache_get() {
+    local ttl_seconds="$1"
+    local f
+    f="$(motd_updates_cache_file)"
+
+    [ -r "$f" ] || return 1
+
+    local now ts
+    now=$(date +%s 2>/dev/null || echo 0)
+    ts=$(awk -F'|' 'NR==1{print $1}' "$f" 2>/dev/null || true)
+
+    if [[ -n "$now" && -n "$ts" && "$now" =~ ^[0-9]+$ && "$ts" =~ ^[0-9]+$ ]]; then
+        if (( now - ts <= ttl_seconds )); then
+            # zwróć resztę linii po pierwszym polu (status|count|backend|note)
+            awk -F'|' 'NR==1{ $1=""; sub(/^\|/,""); print }' "$f" 2>/dev/null
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+motd_updates_cache_put() {
+    local status="$1" count="$2" backend="$3" note="$4"
+    local f
+    f="$(motd_updates_cache_file)"
+
+    local now
+    now=$(date +%s 2>/dev/null || echo 0)
+
+    # Format: ts|status|count|backend|note
+    printf "%s|%s|%s|%s|%s\n" "$now" "$status" "$count" "$backend" "$note" >"$f" 2>/dev/null || true
+}
+
+count_updates_apt() {
+    # Nie robimy `apt update` (żadnej sieci). Liczba bazuje na lokalnym cache.
+    # `apt list --upgradable` wypisuje 1 linię nagłówka na stderr/stdout zależnie od wersji.
+    # Wymuszamy C locale dla spójności.
+    local out
+    out=$(LC_ALL=C run_timed 2 apt list --upgradable 2>/dev/null || true)
+
+    if [ -z "$out" ]; then
+        echo "unknown"
+        return 0
+    fi
+
+    # Odfiltruj potencjalny nagłówek "Listing..." i policz resztę
+    local n
+    n=$(printf "%s\n" "$out" | grep -vE '^Listing\.{3}' | grep -cE '.*/.+' || true)
+
+    if [[ "$n" =~ ^[0-9]+$ ]]; then
+        echo "$n"
+    else
+        echo "unknown"
+    fi
+}
+
+count_updates_dnf() {
+    # Bez --refresh, żeby dnf nie próbował iść do sieci.
+    # dnf zwraca kod 100 gdy są aktualizacje.
+    local out rc
+    out=$(LC_ALL=C run_timed 3 dnf -q check-update 2>/dev/null)
+    rc=$?
+
+    # 0 = brak, 100 = są, inne = błąd
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 100 ]; then
+        echo "unknown"
+        return 0
+    fi
+
+    # Zlicz linie pakietów: zaczynają się od nazwy pakietu (nie spacje), 3 kolumny.
+    # Pomijamy metadane i puste linie.
+    local n
+    n=$(printf "%s\n" "$out" | awk 'NF>=3 && $1 !~ /^Last/ && $1 !~ /^Obsoleting/ {print}' | wc -l | tr -d ' ')
+
+    if [[ "$n" =~ ^[0-9]+$ ]]; then
+        echo "$n"
+    else
+        echo "unknown"
+    fi
+}
+
+count_updates_arch() {
+    local out
+    if have checkupdates; then
+        out=$(run_timed 3 checkupdates 2>/dev/null || true)
+    else
+        out=$(run_timed 3 pacman -Qu 2>/dev/null || true)
+    fi
+
+    if [ -z "$out" ]; then
+        # Może oznaczać 0 aktualizacji albo błąd/lock; bezpiecznie zwracamy 0 tylko jeśli komenda istniała.
+        echo "0"
+        return 0
+    fi
+
+    local n
+    n=$(printf "%s\n" "$out" | wc -l | tr -d ' ')
+    if [[ "$n" =~ ^[0-9]+$ ]]; then
+        echo "$n"
+    else
+        echo "unknown"
+    fi
+}
+
+get_updates_info() {
+    # output: status|count|backend|note
+    # status: ok|unknown
+    # count: liczba lub -
+    local cached
+    cached=$(motd_updates_cache_get 600 2>/dev/null || true)
+    if [ -n "$cached" ]; then
+        echo "$cached"
+        return 0
+    fi
+
+    local backend="" count="unknown" note=""
+
+    if have apt; then
+        backend="apt"
+        count=$(count_updates_apt)
+    elif have dnf; then
+        backend="dnf"
+        count=$(count_updates_dnf)
+    elif have pacman; then
+        backend="pacman"
+        count=$(count_updates_arch)
+    else
+        backend="-"
+        count="unknown"
+        note="Brak obsługi (apt/dnf/pacman)"
+    fi
+
+    if [[ "$count" =~ ^[0-9]+$ ]]; then
+        motd_updates_cache_put "ok" "$count" "$backend" "$note"
+        echo "ok|$count|$backend|$note"
+    else
+        motd_updates_cache_put "unknown" "-" "$backend" "Brak danych (timeout/cache)"
+        echo "unknown|-|$backend|Brak danych (timeout/cache)"
+    fi
+}
+
 # --- Ostatnie logowanie SSH (IP + opcjonalnie nazwa z Tailscale) ---
 is_tailscale_ip() {
     # 100.64.0.0/10 => 100.(64-127).x.x
@@ -136,6 +299,27 @@ if [ -n "$LAST_IP" ]; then
     fi
 
     echo -e " ${CYAN}Ostatnie połączenie SSH:${NC}    ${PURPLE}$LAST_LOGIN_INFO${NC}"
+fi
+
+# Aktualizacje
+UPD_INFO=$(get_updates_info)
+UPD_STATUS=$(echo "$UPD_INFO" | awk -F'|' '{print $1}')
+UPD_COUNT=$(echo "$UPD_INFO" | awk -F'|' '{print $2}')
+UPD_BACKEND=$(echo "$UPD_INFO" | awk -F'|' '{print $3}')
+UPD_NOTE=$(echo "$UPD_INFO" | awk -F'|' '{print $4}')
+
+if [ "$UPD_STATUS" = "ok" ] && [[ "$UPD_COUNT" =~ ^[0-9]+$ ]]; then
+    if [ "$UPD_COUNT" -eq 0 ]; then
+        echo -e " ${CYAN}Aktualizacje:${NC}               ${GREEN}0${NC} (brak)${PURPLE} [$UPD_BACKEND]${NC}"
+    else
+        echo -e " ${CYAN}Aktualizacje:${NC}               ${YELLOW}$UPD_COUNT${NC} dostępnych ${PURPLE}[$UPD_BACKEND]${NC}"
+    fi
+else
+    if [ -n "$UPD_NOTE" ]; then
+        echo -e " ${CYAN}Aktualizacje:${NC}               ${YELLOW}Brak danych${NC} ${PURPLE}[$UPD_BACKEND]${NC} - $UPD_NOTE"
+    else
+        echo -e " ${CYAN}Aktualizacje:${NC}               ${YELLOW}Brak danych${NC} ${PURPLE}[$UPD_BACKEND]${NC}"
+    fi
 fi
 
 echo -e "\n${BLUE}── RAM ────────────────────────────────────────────────────────${NC}"
