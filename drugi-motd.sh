@@ -9,6 +9,25 @@ PURPLE='\033[1;35m'
 CYAN='\033[1;36m'
 NC='\033[0m'
 
+# Wczytanie konfiguracji
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="$SCRIPT_DIR/motd.conf"
+
+# Wartości domyślne (jeśli brak pliku konfiguracyjnego)
+SHOW_HEADER=1
+SHOW_SYSTEM_INFO=1
+SHOW_IP_INFO=1
+SHOW_LAST_SSH=1
+SHOW_UPDATES=1
+SHOW_MEMORY=1
+SHOW_DISKS=1
+SHOW_DOCKER=1
+
+# Wczytaj konfigurację, jeśli istnieje
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+fi
+
 # --- Aktualizacje (best-effort, szybkie: timeout + cache, bez wymuszania sieci) ---
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -68,17 +87,31 @@ count_updates_apt() {
     # Nie robimy `apt update` (żadnej sieci). Liczba bazuje na lokalnym cache.
     # `apt list --upgradable` wypisuje 1 linię nagłówka na stderr/stdout zależnie od wersji.
     # Wymuszamy C locale dla spójności.
-    local out
-    out=$(LC_ALL=C run_timed 2 apt list --upgradable 2>/dev/null || true)
+    local out rc
+    out=$(LC_ALL=C run_timed 2 apt list --upgradable 2>/dev/null)
+    rc=$?
 
-    if [ -z "$out" ]; then
+    # Jeśli komenda się udała, a brak danych, traktuj jako 0 aktualizacji.
+    if [ "$rc" -eq 0 ] && [ -z "$out" ]; then
+        echo "0"
+        return 0
+    fi
+
+    if [ "$rc" -ne 0 ]; then
+        # Typowy przypadek: brak lokalnych list APT (np. świeży system/kontener)
+        # – wtedy nie strasz "Brak danych", tylko pokaż 0.
+        if [ ! -d /var/lib/apt/lists ] || ! ls /var/lib/apt/lists/*_Packages >/dev/null 2>&1; then
+            echo "0"
+            return 0
+        fi
+
         echo "unknown"
         return 0
     fi
 
-    # Odfiltruj potencjalny nagłówek "Listing..." i policz resztę
+    # Odfiltruj nagłówki "Listing..." niezależnie od wariantu
     local n
-    n=$(printf "%s\n" "$out" | grep -vE '^Listing\.{3}' | grep -cE '.*/.+' || true)
+    n=$(printf "%s\n" "$out" | grep -vE '^Listing' | grep -cE '.*/.+' || true)
 
     if [[ "$n" =~ ^[0-9]+$ ]]; then
         echo "$n"
@@ -96,6 +129,12 @@ count_updates_dnf() {
 
     # 0 = brak, 100 = są, inne = błąd
     if [ "$rc" -ne 0 ] && [ "$rc" -ne 100 ]; then
+        # Jeśli dnf nie ma metadanych/cache (częste w kontenerach/offline), pokaż 0 zamiast "Brak danych".
+        if [ ! -d /var/cache/dnf ] || ! find /var/cache/dnf -maxdepth 3 -type f -name repomd.xml -print -quit 2>/dev/null | grep -q .; then
+            echo "0"
+            return 0
+        fi
+
         echo "unknown"
         return 0
     fi
@@ -113,16 +152,23 @@ count_updates_dnf() {
 }
 
 count_updates_arch() {
-    local out
+    local out rc
     if have checkupdates; then
-        out=$(run_timed 3 checkupdates 2>/dev/null || true)
+        out=$(run_timed 3 checkupdates 2>/dev/null)
+        rc=$?
     else
-        out=$(run_timed 3 pacman -Qu 2>/dev/null || true)
+        out=$(run_timed 3 pacman -Qu 2>/dev/null)
+        rc=$?
     fi
 
     if [ -z "$out" ]; then
-        # Może oznaczać 0 aktualizacji albo błąd/lock; bezpiecznie zwracamy 0 tylko jeśli komenda istniała.
-        echo "0"
+        # Puste wyjście przy rc=0 to najczęściej „0 aktualizacji”.
+        # Gdy rc!=0, to raczej lock/błąd bazy – wtedy sygnalizuj unknown.
+        if [ "$rc" -eq 0 ]; then
+            echo "0"
+        else
+            echo "unknown"
+        fi
         return 0
     fi
 
@@ -167,7 +213,7 @@ get_updates_info() {
         motd_updates_cache_put "ok" "$count" "$backend" "$note"
         echo "ok|$count|$backend|$note"
     else
-        motd_updates_cache_put "unknown" "-" "$backend" "Brak danych (timeout/cache)"
+        # Nie cache'uj "unknown", żeby nie przyklejać "Brak danych" na 10 minut.
         echo "unknown|-|$backend|Brak danych (timeout/cache)"
     fi
 }
@@ -241,10 +287,12 @@ draw_bar() {
 }
 
 clear
-echo -e "${BLUE}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓${NC}"
-toilet -f small -F metal "                  $(hostname)"
-echo ""
-echo -e "${BLUE}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛${NC}"
+if [ "$SHOW_HEADER" = "1" ]; then
+    echo -e "${BLUE}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓${NC}"
+    toilet -f small -F metal "                  $(hostname)"
+    echo ""
+    echo -e "${BLUE}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛${NC}"
+fi
 
 # podstawowe informacje o systemie
 format_uptime_pl() {
@@ -273,112 +321,130 @@ LOAD=${PURPLE}$(cat /proc/loadavg | awk '{print $1}')
 IP_LOC=${PURPLE}$(hostname -I | awk '{print $1}')
 IP_PUB=$(get_public_ip)
 
-echo ""
-echo -e " ${CYAN}System:${PURPLE}                     $(lsb_release -d | cut -f2)"
-echo -e " ${CYAN}Czas działania:${NC}             $UPTIME"
-echo -e " ${CYAN}IP Prywatne:${NC}                $IP_LOC"
-if [ -n "$IP_PUB" ]; then
-    echo -e " ${CYAN}IP Publiczne:${NC}               ${PURPLE}$IP_PUB${NC}"
-else
-    echo -e " ${CYAN}IP Publiczne:${NC}               ${YELLOW}Brak (curl/wget lub brak sieci)${NC}"
+if [ "$SHOW_SYSTEM_INFO" = "1" ] || [ "$SHOW_IP_INFO" = "1" ] || [ "$SHOW_LAST_SSH" = "1" ] || [ "$SHOW_UPDATES" = "1" ]; then
+    echo ""
 fi
 
-echo ""
+if [ "$SHOW_SYSTEM_INFO" = "1" ]; then
+    echo -e " ${CYAN}System:${PURPLE}                     $(lsb_release -d | cut -f2)"
+    echo -e " ${CYAN}Czas działania:${NC}             $UPTIME"
+fi
+
+if [ "$SHOW_IP_INFO" = "1" ]; then
+    echo -e " ${CYAN}IP Prywatne:${NC}                $IP_LOC"
+    if [ -n "$IP_PUB" ]; then
+        echo -e " ${CYAN}IP Publiczne:${NC}               ${PURPLE}$IP_PUB${NC}"
+    else
+        echo -e " ${CYAN}IP Publiczne:${NC}               ${YELLOW}Brak (curl/wget lub brak sieci)${NC}"
+    fi
+fi
+
+if [ "$SHOW_SYSTEM_INFO" = "1" ] || [ "$SHOW_IP_INFO" = "1" ] || [ "$SHOW_LAST_SSH" = "1" ] || [ "$SHOW_UPDATES" = "1" ]; then
+    echo ""
+fi
 # (opcjonalnie) loadavg, jak chcesz zostawić:
 # echo -e " ${CYAN}Load (1m):${NC}       $LOAD"
 
-LAST_IP=$(get_last_ssh_ip)
-if [ -n "$LAST_IP" ]; then
-    LAST_LOGIN_INFO="$LAST_IP"
+if [ "$SHOW_LAST_SSH" = "1" ]; then
+    LAST_IP=$(get_last_ssh_ip)
+    if [ -n "$LAST_IP" ]; then
+        LAST_LOGIN_INFO="$LAST_IP"
 
-    if is_tailscale_ip "$LAST_IP"; then
-        TS_NAME=$(tailscale_name_for_ip "$LAST_IP")
-        if [ -n "$TS_NAME" ]; then
-            LAST_LOGIN_INFO="$LAST_IP ($TS_NAME)"
+        if is_tailscale_ip "$LAST_IP"; then
+            TS_NAME=$(tailscale_name_for_ip "$LAST_IP")
+            if [ -n "$TS_NAME" ]; then
+                LAST_LOGIN_INFO="$LAST_IP ($TS_NAME)"
+            fi
         fi
-    fi
 
-    echo -e " ${CYAN}Ostatnie połączenie SSH:${NC}    ${PURPLE}$LAST_LOGIN_INFO${NC}"
+        echo -e " ${CYAN}Ostatnie połączenie SSH:${NC}    ${PURPLE}$LAST_LOGIN_INFO${NC}"
+    fi
 fi
 
 # Aktualizacje
-UPD_INFO=$(get_updates_info)
-UPD_STATUS=$(echo "$UPD_INFO" | awk -F'|' '{print $1}')
-UPD_COUNT=$(echo "$UPD_INFO" | awk -F'|' '{print $2}')
-UPD_BACKEND=$(echo "$UPD_INFO" | awk -F'|' '{print $3}')
-UPD_NOTE=$(echo "$UPD_INFO" | awk -F'|' '{print $4}')
+if [ "$SHOW_UPDATES" = "1" ]; then
+    UPD_INFO=$(get_updates_info)
+    UPD_STATUS=$(echo "$UPD_INFO" | awk -F'|' '{print $1}')
+    UPD_COUNT=$(echo "$UPD_INFO" | awk -F'|' '{print $2}')
+    UPD_BACKEND=$(echo "$UPD_INFO" | awk -F'|' '{print $3}')
+    UPD_NOTE=$(echo "$UPD_INFO" | awk -F'|' '{print $4}')
 
-if [ "$UPD_STATUS" = "ok" ] && [[ "$UPD_COUNT" =~ ^[0-9]+$ ]]; then
-    if [ "$UPD_COUNT" -eq 0 ]; then
-        echo -e " ${CYAN}Aktualizacje:${NC}               ${GREEN}0${NC} (brak)${PURPLE} [$UPD_BACKEND]${NC}"
+    if [ "$UPD_STATUS" = "ok" ] && [[ "$UPD_COUNT" =~ ^[0-9]+$ ]]; then
+        if [ "$UPD_COUNT" -eq 0 ]; then
+            echo -e " ${CYAN}Aktualizacje:${NC}               ${GREEN}0${NC} (brak)${PURPLE} [$UPD_BACKEND]${NC}"
+        else
+            echo -e " ${CYAN}Aktualizacje:${NC}               ${YELLOW}$UPD_COUNT${NC} dostępnych ${PURPLE}[$UPD_BACKEND]${NC}"
+        fi
     else
-        echo -e " ${CYAN}Aktualizacje:${NC}               ${YELLOW}$UPD_COUNT${NC} dostępnych ${PURPLE}[$UPD_BACKEND]${NC}"
-    fi
-else
-    if [ -n "$UPD_NOTE" ]; then
-        echo -e " ${CYAN}Aktualizacje:${NC}               ${YELLOW}Brak danych${NC} ${PURPLE}[$UPD_BACKEND]${NC} - $UPD_NOTE"
-    else
-        echo -e " ${CYAN}Aktualizacje:${NC}               ${YELLOW}Brak danych${NC} ${PURPLE}[$UPD_BACKEND]${NC}"
+        if [ -n "$UPD_NOTE" ]; then
+            echo -e " ${CYAN}Aktualizacje:${NC}               ${YELLOW}Brak danych${NC} ${PURPLE}[$UPD_BACKEND]${NC} - $UPD_NOTE"
+        else
+            echo -e " ${CYAN}Aktualizacje:${NC}               ${YELLOW}Brak danych${NC} ${PURPLE}[$UPD_BACKEND]${NC}"
+        fi
     fi
 fi
 
-echo -e "\n${BLUE}── RAM ────────────────────────────────────────────────────────${NC}"
+if [ "$SHOW_MEMORY" = "1" ]; then
+    echo -e "\n${BLUE}── RAM ────────────────────────────────────────────────────────${NC}"
 
-# RAM (defensywnie: niektóre systemy/kontenery mogą zwrócić 0/puste)
-MEM_USED=$(free -b 2>/dev/null | awk '/^Mem:/ {print $3; exit}')
-MEM_TOTAL=$(free -b 2>/dev/null | awk '/^Mem:/ {print $2; exit}')
+    # RAM (defensywnie: niektóre systemy/kontenery mogą zwrócić 0/puste)
+    MEM_USED=$(free -b 2>/dev/null | awk '/^Mem:/ {print $3; exit}')
+    MEM_TOTAL=$(free -b 2>/dev/null | awk '/^Mem:/ {print $2; exit}')
 
-if [[ -n "$MEM_TOTAL" && "$MEM_TOTAL" =~ ^[0-9]+$ && "$MEM_TOTAL" -gt 0 && -n "$MEM_USED" && "$MEM_USED" =~ ^[0-9]+$ ]]; then
-    MEM_PERC=$(( MEM_USED * 100 / MEM_TOTAL ))
-    MEM_HUMAN=$(free -h 2>/dev/null | awk '/^Mem:/ {print $3 "/" $2; exit}')
-    echo ""
-    printf " ${GREEN}RAM:${NC}  %-15s "
-    draw_bar "$MEM_PERC"
-    echo -e " (${MEM_HUMAN})"
-else
-    echo -e "\n ${GREEN}RAM:${NC}  ${YELLOW}Brak danych o pamięci${NC}"
-fi
+    if [[ -n "$MEM_TOTAL" && "$MEM_TOTAL" =~ ^[0-9]+$ && "$MEM_TOTAL" -gt 0 && -n "$MEM_USED" && "$MEM_USED" =~ ^[0-9]+$ ]]; then
+        MEM_PERC=$(( MEM_USED * 100 / MEM_TOTAL ))
+        MEM_HUMAN=$(free -h 2>/dev/null | awk '/^Mem:/ {print $3 "/" $2; exit}')
+        echo ""
+        printf " ${GREEN}RAM:${NC}  %-15s "
+        draw_bar "$MEM_PERC"
+        echo -e " (${MEM_HUMAN})"
+    else
+        echo -e "\n ${GREEN}RAM:${NC}  ${YELLOW}Brak danych o pamięci${NC}"
+    fi
 
-# SWAP (bez błędów gdy brak swap albo free zwraca pusto)
-SWAP_USED=$(free -b 2>/dev/null | awk '/^Swap:/ {print $3; exit}')
-SWAP_TOTAL=$(free -b 2>/dev/null | awk '/^Swap:/ {print $2; exit}')
+    # SWAP (bez błędów gdy brak swap albo free zwraca pusto)
+    SWAP_USED=$(free -b 2>/dev/null | awk '/^Swap:/ {print $3; exit}')
+    SWAP_TOTAL=$(free -b 2>/dev/null | awk '/^Swap:/ {print $2; exit}')
 
-if [[ -n "$SWAP_TOTAL" && "$SWAP_TOTAL" =~ ^[0-9]+$ && "$SWAP_TOTAL" -gt 0 && -n "$SWAP_USED" && "$SWAP_USED" =~ ^[0-9]+$ ]]; then
-    SWAP_PERC=$(( SWAP_USED * 100 / SWAP_TOTAL ))
-    SWAP_HUMAN=$(free -h 2>/dev/null | awk '/^Swap:/ {print $3 "/" $2; exit}')
-    printf " ${GREEN}SWAP:${NC} %-15s "
-    draw_bar "$SWAP_PERC"
-    echo -e " (${SWAP_HUMAN})"
-elif [[ -n "$SWAP_TOTAL" && "$SWAP_TOTAL" =~ ^[0-9]+$ && "$SWAP_TOTAL" -eq 0 ]]; then
-    echo -e " ${GREEN}SWAP:${NC} ${YELLOW}Brak SWAP${NC}"
-else
-    echo -e " ${GREEN}SWAP:${NC} ${YELLOW}Brak danych o SWAP${NC}"
+    if [[ -n "$SWAP_TOTAL" && "$SWAP_TOTAL" =~ ^[0-9]+$ && "$SWAP_TOTAL" -gt 0 && -n "$SWAP_USED" && "$SWAP_USED" =~ ^[0-9]+$ ]]; then
+        SWAP_PERC=$(( SWAP_USED * 100 / SWAP_TOTAL ))
+        SWAP_HUMAN=$(free -h 2>/dev/null | awk '/^Swap:/ {print $3 "/" $2; exit}')
+        printf " ${GREEN}SWAP:${NC} %-15s "
+        draw_bar "$SWAP_PERC"
+        echo -e " (${SWAP_HUMAN})"
+    elif [[ -n "$SWAP_TOTAL" && "$SWAP_TOTAL" =~ ^[0-9]+$ && "$SWAP_TOTAL" -eq 0 ]]; then
+        echo -e " ${GREEN}SWAP:${NC} ${YELLOW}Brak SWAP${NC}"
+    else
+        echo -e " ${GREEN}SWAP:${NC} ${YELLOW}Brak danych o SWAP${NC}"
+    fi
 fi
 
 # Punkty montowania
 dyski=( "/" "/dysk2" "/dysk3" )
 
-echo -e "\n${BLUE}── Dyski ──────────────────────────────────────────────────────${NC}"
+if [ "$SHOW_DISKS" = "1" ]; then
+    echo -e "\n${BLUE}── Dyski ──────────────────────────────────────────────────────${NC}"
 
-echo ""
+    echo ""
 
-for MOUNT in "${dyski[@]}"; do
-    if [ -d "$MOUNT" ]; then
-        INFO=$(df -h "$MOUNT" | tail -n 1)
-        PERC=$(echo "$INFO" | awk '{print $(NF-1)}' | sed 's/%//')
-        FREE=$(echo "$INFO" | awk '{print $(NF-2)}')
+    for MOUNT in "${dyski[@]}"; do
+        if [ -d "$MOUNT" ]; then
+            INFO=$(df -h "$MOUNT" | tail -n 1)
+            PERC=$(echo "$INFO" | awk '{print $(NF-1)}' | sed 's/%//')
+            FREE=$(echo "$INFO" | awk '{print $(NF-2)}')
 
-        # Skracanie ścieżki
-        DISPLAY_NAME=$(echo "$MOUNT" | sed "s|$HOME|~|")
+            # Skracanie ścieżki
+            DISPLAY_NAME=$(echo "$MOUNT" | sed "s|$HOME|~|")
 
-        printf " ${GREEN}Dysk:${NC} %-15s " "$DISPLAY_NAME"
-        draw_bar "$PERC"
-        echo -e " ($FREE wolne)"
-    fi
-done
+            printf " ${GREEN}Dysk:${NC} %-15s " "$DISPLAY_NAME"
+            draw_bar "$PERC"
+            echo -e " ($FREE wolne)"
+        fi
+    done
+fi
 
 # spawdzanie ile kontenerow dziala i ile jest wszytkich
-if command -v docker >/dev/null 2>&1; then
+if [ "$SHOW_DOCKER" = "1" ] && command -v docker >/dev/null 2>&1; then
     echo -e "\n${BLUE}── Kontenery Docker ───────────────────────────────────────────${NC}"
     echo ""
     D_RUNNING=$(docker ps --format "{{.ID}}" 2>/dev/null | wc -l)

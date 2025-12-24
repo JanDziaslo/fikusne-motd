@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_MOTD="drugi-motd"
 TARGET="/etc/update-motd.d/10-motd-custom"
+CONFIG_SOURCE="$SCRIPT_DIR/motd.conf"
+CONFIG_TARGET="/etc/update-motd.d/motd.conf"
 DEPS=(toilet lsb-release)
 
 usage() {
@@ -68,6 +70,19 @@ fi
 
 cp "$SOURCE" "$TARGET"
 chmod +x "$TARGET"
+
+# Kopiuj plik konfiguracyjny (jeśli istnieje)
+if [[ -f "$CONFIG_SOURCE" ]]; then
+    if [[ -e "$CONFIG_TARGET" ]]; then
+        echo "Plik konfiguracyjny już istnieje: $CONFIG_TARGET (nie nadpisuję)"
+    else
+        cp "$CONFIG_SOURCE" "$CONFIG_TARGET"
+        chmod 644 "$CONFIG_TARGET"
+        echo "Skopiowano plik konfiguracyjny do $CONFIG_TARGET"
+    fi
+else
+    echo "UWAGA: Brak pliku konfiguracyjnego motd.conf w katalogu źródłowym"
+fi
 
 echo "Zainstalowano MOTD z pliku $MOTD do $TARGET"
 
