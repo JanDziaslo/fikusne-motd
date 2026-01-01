@@ -8,7 +8,7 @@ Zależności potrzebne do odpalenia:
 ##### Przykładowy wygląd
 ![Przykładowy wygląd](img/pierwszy-motd.png)
 #### MOTD drugi
-Domyślnie wyświetla tylko dysk który jest zamontowany w "/" jeżeli chcesz więcej dysków zmodyfikuj tablice w linijce 63 podmieniajac przykładowe punkty montowania na te które cię interesują np. "/mnt/dysk2"
+Domyślnie wyświetla tylko dysk który jest zamontowany w "/" jeżeli chcesz więcej dysków zmodyfikuj tablice w linijce 423 podmieniajac przykładowe punkty montowania na te które cię interesują np. "/mnt/dysk2"
 
 Zależności potrzebne do odpalenia:
 - toilet
@@ -75,7 +75,7 @@ SHOW_DOCKER=1
 ## Instalacja MOTD
 
 ```bash
-sudo ./install.sh --motd drugi-motd.sh --install-deps
+sudo bash install.sh --motd drugi-motd.sh --install-deps
 ```
 
 Flagi:
