@@ -304,6 +304,8 @@ format_uptime_pl() {
     # liczba + jednostka (przykrywa hours/hours, minutes/minute, days/day)
     s=$(echo "$s" \
         | sed -E \
+            -e 's/\b([0-9]+)\s+weeks?\b/\1 tygodni/g' \
+            -e 's/\b1\s+tygodni\b/1 tydzień/g' \
             -e 's/\b([0-9]+)\s+days?\b/\1 dni/g' \
             -e 's/\b1\s+dni\b/1 dzień/g' \
             -e 's/\b([0-9]+)\s+hours?\b/\1 godzin/g' \
